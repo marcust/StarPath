@@ -27,14 +27,14 @@ import org.thiesen.starpath.net.command.ClearCommand;
 import org.thiesen.starpath.net.command.DeleteCommand;
 import org.thiesen.starpath.net.command.FindCommand;
 import org.thiesen.starpath.net.command.PrintCommand;
-import org.thiesen.starpath.search.AStarAlgorithm;
+import org.thiesen.starpath.search.ParallelAStarAlgorithm;
 import org.thiesen.starpath.search.SearchAlgorithm;
 
 public class StarPathContext {
     
     private final static StarPathContext INSTANCE = new StarPathContext();
     private final ConnectionContainer _container = new ConnectionContainer();
-    private final SearchAlgorithm _algorithm = new AStarAlgorithm();
+    private final SearchAlgorithm _algorithm = new ParallelAStarAlgorithm();
     
     private StarPathContext() {
         // singleton;
