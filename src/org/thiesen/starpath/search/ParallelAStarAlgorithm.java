@@ -19,81 +19,77 @@
  */
 package org.thiesen.starpath.search;
 
-import gnu.trove.set.TLongSet;
-import gnu.trove.set.hash.TLongHashSet;
-
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-
-import javolution.util.ReentrantLock;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.cliffc.high_scale_lib.NonBlockingHashMapLong;
 import org.thiesen.starpath.ConnectionContainer;
 
 public class ParallelAStarAlgorithm implements SearchAlgorithm {
 
-    private final static ReentrantLock SEEN_LOCK = new ReentrantLock();
-    
     private static class FindTask implements Runnable {
 
         private final PathContainer _pathContainer;
         private final ConnectionContainer _container;
         private final long _first;
         private final long _second;
-        private final TLongSet _seen;
+        private final NonBlockingHashMapLong<Boolean> _seen;
         private final BlockingQueue<long[]> _resultQueue;
+        private final ZeroAwaitingLatch _lock;
 
-        public FindTask( final BlockingQueue<long[]> resultQueue, final PathContainer pathContainer, final ConnectionContainer container, final long first, final long second, final TLongSet seen ) {
+        public FindTask( final BlockingQueue<long[]> resultQueue, final PathContainer pathContainer, final ConnectionContainer container, final long first, final long second, final NonBlockingHashMapLong<Boolean> seen, final ZeroAwaitingLatch locker ) {
             _resultQueue = resultQueue;
             _pathContainer = pathContainer;
             _container = container;
             _first = first;
             _second = second;
             _seen = seen;
+            _lock = locker;
         }
 
         @Override
         public void run() {
-            final NonBlockingHashMapLong<Boolean> entry = _container.getValuesFor( _pathContainer.getLast() );
-            if ( _resultQueue.size() != 0 ) {
-                return;
-            }
-            
-            if ( entry == null ) {
-                return;
-            }
-
-            if ( entry.containsKey( _second ) ) {
-                _resultQueue.add( _pathContainer.append( _second ).asArray() );
-                return;
-            }
-
-            if ( _pathContainer.size() == 1000 ) {
-                return;
-            }
-
-            for ( final long value : entry.keySet() ) {
-                SEEN_LOCK.lock();
-                if ( !_seen.contains( value ) ) {
-                    _seen.add( value );
-                    SEEN_LOCK.unlock();
-                    EXECUTOR.submit( new FindTask( _resultQueue, _pathContainer.append( value ), _container, _first, _second, _seen ) );
+            try {
+                final NonBlockingHashMapLong<Boolean> entry = _container.getValuesFor( _pathContainer.getLast() );
+                if ( _resultQueue.size() != 0 ) {
+                    return;
                 }
+
+                if ( entry == null ) {
+                    return;
+                }
+
+                if ( entry.containsKey( _second ) ) {
+                    _resultQueue.add( _pathContainer.append( _second ).asArray() );
+                    return;
+                }
+
+                if ( _pathContainer.size() == 1000 ) {
+                    return;
+                }
+
+                for ( final long value : entry.keySet() ) {
+                    if ( _seen.putIfAbsent( value, Boolean.TRUE ) == null ) {
+                        _lock.createOne();
+                        EXECUTOR.submit( new FindTask( _resultQueue, _pathContainer.append( value ), _container, _first, _second, _seen, _lock ) );
+                    }
+                }
+
+            } finally {
+                _lock.destroyOne();
             }
-
         }
-
-
     }
 
     private static final long[] EMPTY_ARRAY = new long[0];
 
     private final static ExecutorService EXECUTOR = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors(), new ThreadFactory() {
-        
+
         @Override
         public Thread newThread( final Runnable r ) {
             final Thread t = new Thread( r );
@@ -101,24 +97,50 @@ public class ParallelAStarAlgorithm implements SearchAlgorithm {
             return t;
         }
     } );
-    
+
     @Override
     public long[] find( final ConnectionContainer container,
             final long first,
             final long second ) {
 
-        final TLongSet seen = new TLongHashSet( 1024 * 100 );
+        final NonBlockingHashMapLong<Boolean> seen = new NonBlockingHashMapLong<Boolean>();
         final BlockingQueue<long[]> resultQueue = new SynchronousQueue<long[]>();
+        final ZeroAwaitingLatch locker = new ZeroAwaitingLatch();
 
-        EXECUTOR.submit( new FindTask( resultQueue, new PathContainer( first ), container, first, second, seen ) );
+        EXECUTOR.submit( new FindTask( resultQueue, new PathContainer( first ), container, first, second, seen, locker ) );
+
+        final AtomicBoolean resultFound = new AtomicBoolean();
+
+        final Thread noResultThread = new Thread( new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    while ( !locker.awaitEmpty( 1, TimeUnit.SECONDS ) ) {
+                        if ( resultFound.get() ) {
+                            return;
+                        }
+                    }
+                    resultQueue.offer( EMPTY_ARRAY );
+                } catch ( final InterruptedException e ) {
+                    Thread.interrupted();
+                }
+            } 
+        }
+        );
+        noResultThread.start();
 
         try {
-            return resultQueue.poll( 1, TimeUnit.DAYS );
+            final long[] result = resultQueue.poll( 1, TimeUnit.DAYS );
+            resultFound.set( true );
+            return result;
+
         } catch ( final InterruptedException e ) {
+            Thread.interrupted();
             return EMPTY_ARRAY;
         }  
 
     }
-  
+
 
 }
